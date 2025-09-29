@@ -12,17 +12,18 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.DialogPanel
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
-import com.intellij.openapi.ui.jbTextField
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.ui.*
+import com.intellij.ui.DocumentAdapter
 import com.intellij.ui.components.JBList
 import com.intellij.ui.dsl.builder.*
 import com.intellij.ui.dsl.builder.Cell
-import com.intellij.ui.layout.enteredTextSatisfies
 import com.intellij.ui.layout.selectedValueMatches
+import com.intellij.util.ui.UIUtil
 import javax.swing.JComponent
 import javax.swing.JList
 import javax.swing.ListSelectionModel
+import javax.swing.event.DocumentEvent
 
 fun createSharedJvmSettingPanel(project: Project): DialogPanel = panel {
     val localSettings = getLocalSprinterSettings(project)
@@ -82,51 +83,73 @@ fun createSharedJvmSettingPanel(project: Project): DialogPanel = panel {
                 .onApply(configurationsWithHAPluginsPicker::onApply)
         }
         groupRowsRange("Hotswap Agent", indent = false) {
-            lateinit var haLocationComponent: TextFieldWithBrowseButton
+            val fileChooserDescriptor = FileChooserDescriptor(
+                false,
+                false,
+                true,
+                false,
+                false,
+                false
+            ).withShowFileSystemRoots(true)
+            val haLocationComponent = TextFieldWithBrowseButton()
+            haLocationComponent.addBrowseFolderListener(
+                "Select Hotswap Agent Location",
+                null,
+                project,
+                fileChooserDescriptor
+            )
+
+            val dependentComponents = mutableListOf<JComponent>()
+
+            fun updateHotswapAgentSettingsState() {
+                val enabled = haLocationComponent.text.isNotBlank()
+                dependentComponents.forEach { component ->
+                    UIUtil.setEnabled(component, enabled, true)
+                }
+            }
+
             row {
-                val fileChooserDescriptor = FileChooserDescriptor(
-                    false,
-                    false,
-                    true,
-                    false,
-                    false,
-                    false
-                ).withShowFileSystemRoots(true)
-                haLocationComponent = textFieldWithBrowseButton(
-                    "Select Hotswap Agent Location",
-                    project,
-                    fileChooserDescriptor
-                ).label("Hotswap agent location: ", LabelPosition.TOP)
+                cell(haLocationComponent)
+                    .label("Hotswap agent location: ", LabelPosition.TOP)
                     .align(Align.FILL)
                     .bindText(localSettings::hotswapAgentLocation)
-                    .component
+                    .onReset { updateHotswapAgentSettingsState() }
             }
-            panel {
-                row {
-                    cell(RawCommandLineEditor())
-                        .label("Hotswap agent CMD arguments: ", LabelPosition.TOP)
-                        .align(AlignX.FILL)
-                        .bind(
-                            RawCommandLineEditor::getText,
-                            RawCommandLineEditor::setText,
-                            MutableProperty(
-                                { sharedSettings.hotswapAgentCMDArguments },
-                                { sharedSettings.hotswapAgentCMDArguments = it }
-                            )
+
+            row {
+                val commandLineEditor = RawCommandLineEditor()
+                dependentComponents += commandLineEditor
+                cell(commandLineEditor)
+                    .label("Hotswap agent CMD arguments: ", LabelPosition.TOP)
+                    .align(AlignX.FILL)
+                    .bind(
+                        RawCommandLineEditor::getText,
+                        RawCommandLineEditor::setText,
+                        MutableProperty(
+                            { sharedSettings.hotswapAgentCMDArguments },
+                            { sharedSettings.hotswapAgentCMDArguments = it }
                         )
+                    )
+            }
+
+            row {
+                val modulesWithCustomHAPluginsPicker = ModulesWithCustomHAPluginsPicker(project)
+                dependentComponents += modulesWithCustomHAPluginsPicker.component
+                cell(modulesWithCustomHAPluginsPicker.component)
+                    .label("Modules with custom hotswap agent plugins:", LabelPosition.TOP)
+                    .align(AlignX.FILL)
+                    .onIsModified(modulesWithCustomHAPluginsPicker::isModified)
+                    .onApply(modulesWithCustomHAPluginsPicker::onApply)
+                    .onReset(modulesWithCustomHAPluginsPicker::onReset)
+            }
+
+            haLocationComponent.textField.document.addDocumentListener(object : DocumentAdapter() {
+                override fun textChanged(e: DocumentEvent) {
+                    updateHotswapAgentSettingsState()
                 }
-                row {
-                    val modulesWithCustomHAPluginsPicker = ModulesWithCustomHAPluginsPicker(project)
-                    cell(modulesWithCustomHAPluginsPicker.component)
-                        .label("Modules with custom hotswap agent plugins:", LabelPosition.TOP)
-                        .align(AlignX.FILL)
-                        .onIsModified(modulesWithCustomHAPluginsPicker::isModified)
-                        .onApply(modulesWithCustomHAPluginsPicker::onApply)
-                        .onReset(modulesWithCustomHAPluginsPicker::onReset)
-                }
-            }.enabledIf(haLocationComponent.jbTextField.enteredTextSatisfies {
-                it.isNotBlank()
             })
+
+            updateHotswapAgentSettingsState()
         }
     }.visibleIf(usedJvmTypePicker.component.selectedValueMatches { it == UsedJvmType.DCEVM })
 }

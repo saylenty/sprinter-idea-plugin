@@ -2,42 +2,116 @@ package com.wrike.sprinter
 
 import com.intellij.execution.lineMarker.RunLineMarkerContributor
 import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiMethod
 import com.wrike.sprinter.frameworks.testFrameworkForRunningInSharedJVMExtensionPoint
-import org.jetbrains.kotlin.idea.base.projectStructure.RootKindFilter
-import org.jetbrains.kotlin.idea.base.projectStructure.matches
-import org.jetbrains.kotlin.idea.highlighter.KotlinTestRunLineMarkerContributor
-import org.jetbrains.kotlin.idea.junit.JunitKotlinTestFrameworkProvider
-import org.jetbrains.kotlin.psi.KtFile
+import java.lang.reflect.Method
 
-class KotlinSameJvmRunLineMarkerContributor: RunLineMarkerContributor() {
-    private val contributorDelegate = KotlinTestRunLineMarkerContributor()
+class KotlinSameJvmRunLineMarkerContributor : RunLineMarkerContributor() {
+    private val delegate: Any? = createDelegate()
+    private val delegateInfoMethod: Method? = findDelegateMethod("getInfo")
+    private val delegateSlowInfoMethod: Method? = findDelegateMethod("getSlowInfo")
 
-    override fun getInfo(element: PsiElement): Info? {
-        contributorDelegate.getInfo(element) ?: return null
-        return calculateInfoIfTestFrameworkIsFound(element)
-    }
+    private val ktFileClass: Class<*>? = loadClass("org.jetbrains.kotlin.psi.KtFile")
+    private val junitProvider: Any? = loadJunitProvider()
+    private val javaTestEntityMethod: Method? = findJavaTestEntityMethod()
+    private val javaTestEntityClass: Class<*>? = loadClass("org.jetbrains.kotlin.idea.extensions.KotlinTestFrameworkProvider\$JavaTestEntity")
+    private val javaTestEntityGetTestMethod: Method? = javaTestEntityClass?.getMethod("getTestMethod")
+    private val javaTestEntityGetTestClass: Method? = javaTestEntityClass?.getMethod("getTestClass")
 
-    override fun getSlowInfo(element: PsiElement): Info? {
-        contributorDelegate.getSlowInfo(element) ?: return null
+    override fun getInfo(element: PsiElement): Info? = delegateInfo(delegateInfoMethod, element)
+
+    override fun getSlowInfo(element: PsiElement): Info? = delegateInfo(delegateSlowInfoMethod, element)
+
+    private fun delegateInfo(method: Method?, element: PsiElement): Info? {
+        if (delegate == null || method == null) return null
+        val delegateResult = try {
+            method.invoke(delegate, element)
+        } catch (_: Throwable) {
+            return null
+        }
+        if (delegateResult == null) return null
         return calculateInfoIfTestFrameworkIsFound(element)
     }
 
     private fun calculateInfoIfTestFrameworkIsFound(element: PsiElement): Info? {
-        if (!RootKindFilter.projectAndLibrarySources.matches(element) || element.containingFile !is KtFile) {
+        if (!isKotlinFile(element) || javaTestEntityMethod == null || junitProvider == null) {
             return null
         }
-        val testEntity = JunitKotlinTestFrameworkProvider.getInstance().getJavaTestEntity(element, checkMethod = true) ?: return null
-        val testMethod = testEntity.testMethod
-        val canRunTestsForElement = testFrameworkForRunningInSharedJVMExtensionPoint.extensionList.any {
-            if (testMethod != null) {
-                it.canRunTestsFor(testMethod)
-            } else {
-                it.canRunTestsFor(testEntity.testClass)
-            }
+
+        val testEntity = try {
+            javaTestEntityMethod.invoke(junitProvider, element, true)
+        } catch (_: Throwable) {
+            null
+        } ?: return null
+
+        val testMethod = javaTestEntityGetTestMethod?.let { invokePsiMethod(it, testEntity) }
+        val testClass = javaTestEntityGetTestClass?.let { invokePsiClass(it, testEntity) }
+
+        val canRunTestsForElement = when {
+            testMethod != null -> testFrameworkForRunningInSharedJVMExtensionPoint.extensionList.any { it.canRunTestsFor(testMethod) }
+            testClass != null -> testFrameworkForRunningInSharedJVMExtensionPoint.extensionList.any { it.canRunTestsFor(testClass) }
+            else -> false
         }
+
         return if (canRunTestsForElement) {
             Info(null, null, ActionManager.getInstance().getAction("RunTestsInExistingJvm"))
-        } else null
+        } else {
+            null
+        }
     }
+
+    private fun invokePsiMethod(method: Method, target: Any): PsiMethod? =
+        (runCatching { method.invoke(target) }.getOrNull() as? PsiMethod)
+
+    private fun invokePsiClass(method: Method, target: Any): PsiClass? =
+        (runCatching { method.invoke(target) }.getOrNull() as? PsiClass)
+
+    private fun isKotlinFile(element: PsiElement): Boolean =
+        ktFileClass?.isInstance(element.containingFile) == true
+
+    private fun createDelegate(): Any? =
+        runCatching {
+            loadClass("org.jetbrains.kotlin.idea.highlighter.KotlinTestRunLineMarkerContributor")
+                ?.getDeclaredConstructor()
+                ?.newInstance()
+        }.getOrNull()
+
+    private fun findDelegateMethod(name: String): Method? =
+        delegate?.javaClass?.methods?.firstOrNull { method ->
+            method.name == name &&
+                method.parameterCount == 1 &&
+                PsiElement::class.java.isAssignableFrom(method.parameterTypes[0])
+        }
+
+    private fun loadJunitProvider(): Any? =
+        runCatching {
+            loadClass("org.jetbrains.kotlin.idea.junit.JunitKotlinTestFrameworkProvider")
+                ?.getMethod("getInstance")
+                ?.invoke(null)
+        }.getOrNull()
+
+    private fun findJavaTestEntityMethod(): Method? {
+        val providerClass = junitProvider?.javaClass ?: return null
+        val direct = runCatching {
+            providerClass.methods.firstOrNull { method ->
+                method.name == "getJavaTestEntity" &&
+                    method.parameterCount == 2 &&
+                    PsiElement::class.java.isAssignableFrom(method.parameterTypes[0])
+            }
+        }.getOrNull()
+
+        if (direct != null) {
+            return direct
+        }
+
+        return runCatching {
+            loadClass("org.jetbrains.kotlin.idea.extensions.KotlinTestFrameworkProvider")
+                ?.getMethod("getJavaTestEntity", PsiElement::class.java, Boolean::class.javaPrimitiveType)
+        }.getOrNull()
+    }
+
+    private fun loadClass(fqn: String): Class<*>? =
+        runCatching { Class.forName(fqn) }.getOrNull()
 }
